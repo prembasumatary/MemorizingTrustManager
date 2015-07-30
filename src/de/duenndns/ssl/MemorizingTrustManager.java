@@ -39,11 +39,14 @@ import android.util.SparseArray;
 import android.os.Handler;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.security.cert.*;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.text.SimpleDateFormat;
@@ -78,8 +81,6 @@ public class MemorizingTrustManager implements X509TrustManager {
 	final static String DECISION_TITLE_ID      = DECISION_INTENT + ".titleId";
 	private final static int NOTIFICATION_ID = 100509;
 
-	final static String NO_TRUST_ANCHOR = "Trust anchor for certification path not found.";
-	
 	static String KEYSTORE_DIR = "KeyStore";
 	static String KEYSTORE_FILE = "KeyStore.bks";
 
@@ -319,11 +320,23 @@ public class MemorizingTrustManager implements X509TrustManager {
 		}
 		try {
 			ks.load(null, null);
-			ks.load(new java.io.FileInputStream(keyStoreFile), "MTM".toCharArray());
-		} catch (java.io.FileNotFoundException e) {
-			LOGGER.log(Level.INFO, "getAppKeyStore(" + keyStoreFile + ") - file does not exist");
-		} catch (Exception e) {
+		} catch (NoSuchAlgorithmException | CertificateException | IOException e) {
 			LOGGER.log(Level.SEVERE, "getAppKeyStore(" + keyStoreFile + ")", e);
+		}
+		InputStream is = null;
+		try {
+			is = new java.io.FileInputStream(keyStoreFile);
+			ks.load(is, "MTM".toCharArray());
+		} catch (NoSuchAlgorithmException | CertificateException | IOException e) {
+			LOGGER.log(Level.INFO, "getAppKeyStore(" + keyStoreFile + ") - exception loading file key store");
+		} finally {
+			if (is != null) {
+				try {
+					is.close();
+				} catch (IOException e) {
+					LOGGER.log(Level.FINE, "getAppKeyStore(" + keyStoreFile + ") - exception closing file key store input stream");
+				}
+			}
 		}
 		return ks;
 	}
@@ -376,6 +389,15 @@ public class MemorizingTrustManager implements X509TrustManager {
 	private boolean isExpiredException(Throwable e) {
 		do {
 			if (e instanceof CertificateExpiredException)
+				return true;
+			e = e.getCause();
+		} while (e != null);
+		return false;
+	}
+
+	private boolean isPathException(Throwable e) {
+		do {
+			if (e instanceof CertPathValidatorException)
 				return true;
 			e = e.getCause();
 		} while (e != null);
@@ -489,17 +511,17 @@ public class MemorizingTrustManager implements X509TrustManager {
 		Throwable e = cause;
 		LOGGER.log(Level.FINE, "certChainMessage for " + e);
 		StringBuffer si = new StringBuffer();
-		if (e.getCause() != null) {
-			e = e.getCause();
-			// HACK: there is no sane way to check if the error is a "trust anchor
-			// not found", so we use string comparison.
-			if (NO_TRUST_ANCHOR.equals(e.getMessage())) {
-				si.append(master.getString(R.string.mtm_trust_anchor));
-			} else
-				si.append(e.getLocalizedMessage());
-			si.append("\n");
+		if (isPathException(e))
+			si.append(master.getString(R.string.mtm_trust_anchor));
+		else if (isExpiredException(e))
+			si.append(master.getString(R.string.mtm_cert_expired));
+		else {
+			// get to the cause
+			while (e.getCause() != null)
+				e = e.getCause();
+			si.append(e.getLocalizedMessage());
 		}
-		si.append("\n");
+		si.append("\n\n");
 		si.append(master.getString(R.string.mtm_connect_anyway));
 		si.append("\n\n");
 		si.append(master.getString(R.string.mtm_cert_details));
